@@ -1,12 +1,43 @@
-# robustRAG
-
 # LocalRAG: Offline RAG System with Intelligent Caching
 
 A high-performance, completely offline Retrieval-Augmented Generation (RAG) system featuring a 2.5-layer caching architecture for accelerated document retrieval and enhanced accuracy in critical domains.
 
+## Table of Contents
+
+1. [Overview](#overview)
+2. [Key Features](#key-features)
+   - [Core RAG Capabilities](#core-rag-capabilities)
+   - [2.5-Layer Intelligent Caching System](#25-layer-intelligent-caching-system)
+   - [Performance Optimization](#performance-optimization)
+   - [Domain-Specific Safety](#domain-specific-safety)
+3. [Architecture](#architecture)
+   - [LocalRAGRetriever](#localragretriever-robustraggpy)
+   - [HighConfidenceCacheManager](#highconfidencecachemanager-layeredcachepy)
+4. [Configuration Options](#configuration-options)
+   - [Embedding Configuration](#embedding-configuration)
+   - [Caching Configuration](#caching-configuration)
+   - [Retrieval Parameters](#retrieval-parameters)
+5. [Performance Characteristics](#performance-characteristics)
+   - [Speed Improvements](#speed-improvements)
+   - [Accuracy Guarantees](#accuracy-guarantees)
+   - [Resource Efficiency](#resource-efficiency)
+6. [Getting Started](#getting-started)
+   - [Installation](#installation)
+   - [Basic Usage](#basic-usage)
+7. [Technical Implementation](#technical-implementation)
+   - [Caching Strategy](#caching-strategy)
+   - [Knowledge Base Versioning](#knowledge-base-versioning)
+   - [Memory Management](#memory-management)
+8. [Monitoring and Statistics](#monitoring-and-statistics)
+9. [Security and Privacy](#security-and-privacy)
+
+---
+
 ## Overview
 
 LocalRAG is designed for applications requiring reliable, fast, and secure document retrieval without external API dependencies. The system combines advanced embedding techniques with intelligent caching to deliver production-ready performance for medical, financial, legal, and general domains.
+
+[↑ Back to top](#table-of-contents)
 
 ## Key Features
 
@@ -46,6 +77,8 @@ LocalRAG is designed for applications requiring reliable, fast, and secure docum
 - **Version Tracking**: Automatic cache invalidation on document changes
 - **Robust Validation**: Multiple validation layers prevent incorrect retrievals
 
+[↑ Back to top](#table-of-contents)
+
 ## Architecture
 
 The system consists of two main components:
@@ -66,6 +99,8 @@ Manages the intelligent caching system:
 - Domain-specific configuration
 - Performance monitoring and statistics
 
+[↑ Back to top](#table-of-contents)
+
 ## Configuration Options
 
 ### Embedding Configuration
@@ -84,6 +119,8 @@ Manages the intelligent caching system:
 - **Rerank N**: Final number of results after cross-encoder reranking
 - **Similarity Thresholds**: Domain-specific confidence requirements
 
+[↑ Back to top](#table-of-contents)
+
 ## Performance Characteristics
 
 ### Speed Improvements
@@ -101,8 +138,9 @@ Manages the intelligent caching system:
 - Disk caching: Persistent storage for embeddings and results
 - Batch processing: Efficient GPU utilization
 
-## Getting Started
+[↑ Back to top](#table-of-contents)
 
+## Getting Started
 
 ### Installation
 
@@ -158,6 +196,8 @@ results = retriever.retrieve(
 )
 ```
 
+[↑ Back to top](#table-of-contents)
+
 ## Technical Implementation
 
 ### Caching Strategy
@@ -173,6 +213,8 @@ Automatic detection of document changes through content hashing ensures cache co
 ### Memory Management
 Intelligent cache sizing with LRU eviction maintains performance while respecting memory constraints.
 
+[↑ Back to top](#table-of-contents)
+
 ## Monitoring and Statistics
 
 The system provides comprehensive metrics:
@@ -182,9 +224,13 @@ The system provides comprehensive metrics:
 - Knowledge base version history
 - Confidence score distributions
 
+[↑ Back to top](#table-of-contents)
+
 ## Security and Privacy
 
 - **No External Dependencies**: Complete offline operation
 - **Data Isolation**: All processing occurs locally
 - **Version Control**: Audit trails for document changes
 - **Configurable Thresholds**: Domain-appropriate safety levels
+
+[↑ Back to top](#table-of-contents)
