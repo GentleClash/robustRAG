@@ -1,5 +1,7 @@
 documents/
-rag_retriever.log
+*.log
+cache/
+*.prof
 
 
 
