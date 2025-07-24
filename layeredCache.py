@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any, Literal, Optional, Tuple
 from dataclasses import dataclass, asdict, field
 import faiss
+import traceback
 
 # Configure logging
 logging.basicConfig(
@@ -545,7 +546,6 @@ class HighConfidenceCacheManager:
 
             except Exception as e:
                 logger.error(f"Failed to add embedding to FAISS cache index: {type(e).__name__}: {str(e)}")
-                import traceback
                 logger.error(f"Traceback: {traceback.format_exc()}")
         
         # Cleanup if cache is too large
@@ -663,24 +663,24 @@ class HighConfidenceCacheManager:
             logger.info(f"Cleaned {len(expired_keys)} exact + {removed_count} embedding cache entries")
 
         if self.enable_semantic_cache and self.cached_embeddings_index:
-             valid_entries_after_cleanup = set(self.embedding_cache) # Set of object references
+            valid_entries_after_cleanup = self.embedding_cache # Set of object references
 
              # Identify FAISS IDs to remove (those whose entries are no longer valid)
-             ids_to_remove = []
-             keys_to_remove_from_map = [] # Keys to remove from cached_embedding_to_entry_map
-             for faiss_id, entry in self.cached_embedding_to_entry_map.items():
-                 if entry not in valid_entries_after_cleanup:
-                     ids_to_remove.append(faiss_id)
-                     keys_to_remove_from_map.append(faiss_id)
+            ids_to_remove = []
+            keys_to_remove_from_map = [] # Keys to remove from cached_embedding_to_entry_map
+            for faiss_id, entry in self.cached_embedding_to_entry_map.items():
+                if entry not in valid_entries_after_cleanup:
+                    ids_to_remove.append(faiss_id)
+                    keys_to_remove_from_map.append(faiss_id)
 
-             if ids_to_remove:
-                 logger.info(f"Rebuilding FAISS index after removing {len(ids_to_remove)} expired/invalid entries.")
-                 self._rebuild_cached_embeddings_index()
+            if ids_to_remove:
+                logger.info(f"Rebuilding FAISS index after removing {len(ids_to_remove)} expired/invalid entries.")
+                self._rebuild_cached_embeddings_index()
 
-             elif keys_to_remove_from_map:
+            elif keys_to_remove_from_map:
                  # If somehow IDs were removed from FAISS but map wasn't cleared (shouldn't happen with rebuild)
-                 for key in keys_to_remove_from_map:
-                     self.cached_embedding_to_entry_map.pop(key, None)
+                for key in keys_to_remove_from_map:
+                    self.cached_embedding_to_entry_map.pop(key, None)
     
     def _load_cache(self) -> None:
         """Load cache from disk with KB version validation"""
@@ -704,7 +704,23 @@ class HighConfidenceCacheManager:
             # Load embedding cache
             if os.path.exists(self.embedding_cache_file):
                 data = np.load(self.embedding_cache_file, allow_pickle=True)
-                all_entries = data['embedding_cache'].tolist()
+                serialized_entries = data['embedding_cache'].tolist()
+
+                all_entries = []
+                for entry_dict in serialized_entries:
+                    entry_dict['timestamp'] = datetime.fromisoformat(entry_dict['timestamp'])
+                    if entry_dict.get('last_accessed'):
+                        entry_dict['last_accessed'] = datetime.fromisoformat(entry_dict['last_accessed'])
+                    else:
+                        entry_dict['last_accessed'] = None
+                    
+                    # Convert list back to numpy array
+                    if isinstance(entry_dict['query_embedding'], list):
+                        entry_dict['query_embedding'] = np.array(entry_dict['query_embedding'], dtype=np.float32)
+                    
+                    # Create EmbeddingCache object
+                    entry = EmbeddingCache(**entry_dict)
+                    all_entries.append(entry)
                 
                 # Filter by KB version
                 valid_entries = [e for e in all_entries if self._is_kb_version_valid(e)]
@@ -721,6 +737,7 @@ class HighConfidenceCacheManager:
                 
         except Exception as e:
             logger.warning(f"Failed to load cache: {e}")
+            logger.warning(f"Load cache traceback: {traceback.format_exc()}")
             self.exact_cache = {}
             self.embedding_cache = []
     
@@ -744,18 +761,65 @@ class HighConfidenceCacheManager:
                 json.dump(serializable_exact, f, indent=2)
             
             # Save embedding cache
+            serializable_embedding = []
+            for entry in self.embedding_cache:
+                entry_dict = asdict(entry)
+                entry_dict['timestamp'] = entry.timestamp.isoformat()
+                if entry.last_accessed:
+                    entry_dict['last_accessed'] = entry.last_accessed.isoformat()
+                else:
+                    entry_dict['last_accessed'] = None
+                
+                # Convert numpy array to list for JSON serialization
+                if isinstance(entry_dict['query_embedding'], np.ndarray):
+                    entry_dict['query_embedding'] = entry_dict['query_embedding'].tolist()
+                
+                serializable_embedding.append(entry_dict)
+
             np.savez_compressed(self.embedding_cache_file, 
-                              embedding_cache=np.array(self.embedding_cache, dtype=object))
+                              embedding_cache=np.array(serializable_embedding, dtype=object))
             
             logger.info(f"Cache saved: {len(self.exact_cache)} exact + {len(self.embedding_cache)} embedding entries")
             
         except Exception as e:
             logger.error(f"Failed to save cache: {e}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
     
     def get_cache_stats(self) -> Dict[str, Any]:
         """Get comprehensive cache statistics"""
         self._cleanup_expired()
         embedding_memory_mb = self._estimated_embedding_cache_memory_mb
+        
+        try:
+            total_embedding_accesses = 0
+            for i, entry in enumerate(self.embedding_cache):
+                try:
+                    access_count: int = getattr(entry, 'access_count', 0)
+                    if access_count is None:
+                        access_count = 0
+                    total_embedding_accesses += access_count
+                except Exception as e:
+                    logger.error(f"Error accessing entry {i} in embedding cache: {e}")
+                    logger.error(f"Entry type: {type(entry)}")
+                    logger.error(f"Entry attributes: {dir(entry) if hasattr(entry, '__dict__') else 'No __dict__'}")
+                    continue
+              
+            total_exact_accesses = 0
+            for key, entry in self.exact_cache.items():
+                try:
+                    access_count: int = getattr(entry, 'access_count', 0)
+                    if access_count is None:
+                        access_count = 0
+                    total_exact_accesses += access_count
+                except Exception as e:
+                    logger.error(f"Error accessing entry {key} in exact cache: {e}")
+                    continue
+                    
+        except Exception as e:
+            logger.error(f"Error in cache stats calculation: {e}")
+            total_embedding_accesses = 0
+            total_exact_accesses = 0
+        
         return {
             'domain_type': self.domain_type,
             'performance_mode': self.performance_mode,
@@ -764,8 +828,8 @@ class HighConfidenceCacheManager:
             'max_memory_mb': self.max_memory_mb,
             'exact_cache_size': len(self.exact_cache),
             'embedding_cache_size': len(self.embedding_cache),
-            'total_exact_accesses': sum(entry.access_count for entry in self.exact_cache.values()),
-            'total_embedding_accesses': sum(entry.access_count for entry in self.embedding_cache),
+            'total_exact_accesses': total_exact_accesses,
+            'total_embedding_accesses': total_embedding_accesses,
             'semantic_threshold': self.semantic_threshold,
             'cross_encoder_threshold': self.cross_encoder_threshold,
             'current_kb_version': self.current_kb_version.version_id if self.current_kb_version else None,

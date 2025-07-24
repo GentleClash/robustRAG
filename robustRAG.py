@@ -1,5 +1,6 @@
 import json
 import os
+import traceback
 import requests
 import numpy as np
 import faiss
@@ -943,6 +944,7 @@ def report_cache_statistics(retriever: LocalRAGRetriever):
             logger.info("✓ Cache saved for future runs")
         except Exception as e:
             logger.error(f"Error reporting/saving cache statistics: {e}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
     else:
         logger.info("Cache manager not enabled or not found.")
 
