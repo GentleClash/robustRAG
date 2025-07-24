@@ -186,9 +186,7 @@ class LocalRAGRetriever:
 
         Args:
             text (str): The input text.
-            model_name (str, optional): The name of the model to use for tokenization.
-
-
+            
         Returns:
             int: The number of tokens in the text.
         """
@@ -413,7 +411,7 @@ class LocalRAGRetriever:
         return embeddings
 
     def build_index(self, sources: Optional[List[str]], 
-                    local_filenames: Optional[List[str]], 
+                    local_filenames: Optional[List[str]]=[], 
                     chunk_size: int = 200, 
                     chunk_overlap: int = 0) -> None:
         """
