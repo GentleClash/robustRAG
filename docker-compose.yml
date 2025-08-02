@@ -1,28 +1,36 @@
 version: '3.8'
 
 services:
-  rag-retrieval:
-    build: .
+  rag-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
     ports:
-      - "8000:8000"  # FastAPI backend
-      - "8501:8501"  # Streamlit frontend
+      - "8000:8000" 
     volumes:
       - ./cache:/app/cache
       - ./documents:/app/documents
       - ./models:/app/models
       - ./temp:/app/temp
       - ./logs:/app/logs
+      - ./:/app 
     environment:
-      - PYTHONPATH=/app
-      - PYTHONUNBUFFERED=1
-      - API_BASE_URL=http://localhost:8000
+      - PORT=8000 
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 30s
+
+  # The Streamlit Frontend Service
+  rag-frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    ports:
+      - "8501:8501" 
+    depends_on:
+      - rag-backend
+    environment:
+      - PORT=8501
+      - API_BASE_URL=http://rag-backend:8000
+    restart: unless-stopped
 
 volumes:
   cache_data:
