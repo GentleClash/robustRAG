@@ -3,6 +3,7 @@ import requests
 import json
 from typing import Dict, Any, List
 import pandas as pd
+import os
 
 # Configure Streamlit page
 st.set_page_config(
@@ -13,7 +14,7 @@ st.set_page_config(
 )
 
 # API Configuration
-API_BASE_URL = st.sidebar.text_input("API Base URL", value="http://localhost:8000")
+API_BASE_URL = st.sidebar.text_input("API Base URL", value=os.getenv("API_BASE_URL"))
 # Domain-specific threshold configurations
 DOMAIN_CONFIGS = {
     "medical": {"semantic_threshold": 0.99, "cross_encoder_threshold": 0.98},
