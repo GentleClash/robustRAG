@@ -4,6 +4,9 @@ import json
 from typing import Dict, Any, List
 import pandas as pd
 import os
+import google.auth
+import google.oauth2.id_token
+from google.auth.transport.requests import Request
 
 # Configure Streamlit page
 st.set_page_config(
@@ -22,10 +25,20 @@ DOMAIN_CONFIGS = {
     "legal": {"semantic_threshold": 0.99, "cross_encoder_threshold": 0.98},
     "general": {"semantic_threshold": 0.95, "cross_encoder_threshold": 0.95}
 }
+
+
+@st.cache_data(ttl=3000)
+def get_auth_headers():
+    """Gets a Google-signed ID token and returns it in an auth header."""
+    credentials, project = google.auth.default()
+    auth_req = Request()
+    id_token = google.oauth2.id_token.fetch_id_token(auth_req, API_BASE_URL)
+    return {"Authorization": f"Bearer {id_token}"}
+
 def check_api_health():
     """Check if the API is accessible"""
     try:
-        response = requests.get(f"{API_BASE_URL}/health", timeout=5)
+        response = requests.get(f"{API_BASE_URL}/health", timeout=5, headers=get_auth_headers())
         return response.status_code == 200, response.json() if response.status_code == 200 else None
     except Exception as e:
         return False, str(e)
@@ -33,7 +46,7 @@ def check_api_health():
 def get_retrievers():
     """Get list of available retrievers"""
     try:
-        response = requests.get(f"{API_BASE_URL}/retriever/list")
+        response = requests.get(f"{API_BASE_URL}/retriever/list", headers=get_auth_headers())
         if response.status_code == 200:
             return response.json().get("retrievers", [])
         return []
@@ -43,7 +56,7 @@ def get_retrievers():
 def create_retriever(config: Dict[str, Any]):
     """Create a new retriever"""
     try:
-        response = requests.post(f"{API_BASE_URL}/retriever/create", json=config)
+        response = requests.post(f"{API_BASE_URL}/retriever/create", json=config, headers=get_auth_headers())
         return response.status_code == 200, response.json()
     except Exception as e:
         return False, str(e)
@@ -51,7 +64,7 @@ def create_retriever(config: Dict[str, Any]):
 def query_retriever(query_request: Dict[str, Any]):
     """Query a retriever"""
     try:
-        response = requests.post(f"{API_BASE_URL}/query", json=query_request)
+        response = requests.post(f"{API_BASE_URL}/query", json=query_request, headers=get_auth_headers())
         return response.status_code == 200, response.json()
     except Exception as e:
         return False, str(e)
@@ -68,8 +81,8 @@ def upload_files_and_create_retriever(name: str, files, rag_config: Dict, cache_
             "rag_config": json.dumps(rag_config),
             "cache_config": json.dumps(cache_config)
         }
-        
-        response = requests.post(f"{API_BASE_URL}/retriever/upload", files=files_data, data=data)
+
+        response = requests.post(f"{API_BASE_URL}/retriever/upload", files=files_data, data=data, headers=get_auth_headers())
         return response.status_code == 200, response.json()
     except Exception as e:
         return False, str(e)
@@ -285,7 +298,7 @@ elif tab == "Manage Retrievers":
         if st.button("🗑️ Delete Retriever", type="secondary"):
             if selected_to_delete:
                 try:
-                    response = requests.delete(f"{API_BASE_URL}/retriever/{selected_to_delete}")
+                    response = requests.delete(f"{API_BASE_URL}/retriever/{selected_to_delete}", headers=get_auth_headers())
                     if response.status_code == 200:
                         st.success(f"✅ Retriever '{selected_to_delete}' deleted successfully")
                         st.rerun()
