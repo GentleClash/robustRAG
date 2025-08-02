@@ -2,8 +2,11 @@ documents/
 *.log
 cache/
 *.prof
-
-
+models/
+ipc.py
+inference.py
+testing.py
+temp/
 
 
 # Byte-compiled / optimized / DLL files

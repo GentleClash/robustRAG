@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  rag-retrieval:
+    build: .
+    ports:
+      - "8000:8000"  # FastAPI backend
+      - "8501:8501"  # Streamlit frontend
+    volumes:
+      - ./cache:/app/cache
+      - ./documents:/app/documents
+      - ./models:/app/models
+      - ./temp:/app/temp
+      - ./logs:/app/logs
+    environment:
+      - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
+      - API_BASE_URL=http://localhost:8000
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  cache_data:
+  documents_data:
+  models_data:
+  temp_data:
+  logs_data:
