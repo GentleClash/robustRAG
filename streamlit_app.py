@@ -17,7 +17,8 @@ st.set_page_config(
 )
 
 # API Configuration
-API_BASE_URL = st.sidebar.text_input("API Base URL", value=os.getenv("API_BASE_URL"))
+#API_BASE_URL = st.sidebar.text_input("API Base URL", value=os.getenv("API_BASE_URL"))
+API_BASE_URL = os.getenv("API_BASE_URL")
 # Domain-specific threshold configurations
 DOMAIN_CONFIGS = {
     "medical": {"semantic_threshold": 0.99, "cross_encoder_threshold": 0.98},
