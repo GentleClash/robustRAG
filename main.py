@@ -33,6 +33,13 @@ app.add_middleware(
 def setup_model_cache() -> str:
     """Setup persistent model caching using Cloud Storage"""
     try:
+        if os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON"):
+            import base64
+            key_data = base64.b64decode(os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON"))
+            with open("/tmp/service-account.json", "wb") as f:
+                f.write(key_data)
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "/tmp/service-account.json"
+            logger.info("✅ Service account credentials loaded")
         # Set HuggingFace cache directory
         hf_cache_dir = "/tmp/huggingface_cache"
         os.makedirs(hf_cache_dir, exist_ok=True)
