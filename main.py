@@ -43,7 +43,6 @@ def setup_model_cache() -> str:
         # Set HuggingFace token if provided
         hf_token = os.getenv("HF_TOKEN")
         if hf_token:
-            os.environ["HUGGINGFACE_HUB_TOKEN"] = hf_token
             logger.info("✅ HuggingFace token configured")
         
         # Setup Cloud Storage sync
@@ -118,11 +117,20 @@ def sync_models_to_storage(bucket_name: str, local_dir: str) -> None:
 
 
 
-
+def prewarm_models():
+    """Pre-download models at startup to avoid runtime delays"""
+    try:
+        from sentence_transformers import SentenceTransformer
+        logger.info("🔥 Pre-warming embedding model...")
+        model = SentenceTransformer(DEFAULT_EMBEDDING_MODEL, trust_remote_code=True)
+        logger.info("✅ Embedding model ready")
+    except Exception as e:
+        logger.warning(f"Pre-warming failed: {e}")
 
 
 # Initialize model cache on startup
 model_cache_dir: str = setup_model_cache()
+prewarm_models()
 
 # Global variables to store retriever instances
 retrievers: Dict[str, Any] = {} # Dict[str, LocalRAGRetriever]
