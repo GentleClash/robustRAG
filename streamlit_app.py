@@ -1,11 +1,9 @@
 import streamlit as st
 import requests
 import json
-from typing import Dict, Any, List
+from typing import Dict, Any
 import pandas as pd
 import os
-import google.auth
-import google.oauth2.id_token
 from google.auth.transport.requests import Request
 
 # Configure Streamlit page
@@ -18,7 +16,7 @@ st.set_page_config(
 
 # API Configuration
 #API_BASE_URL = st.sidebar.text_input("API Base URL", value=os.getenv("API_BASE_URL"))
-API_BASE_URL = os.getenv("API_BASE_URL")
+API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
 # Domain-specific threshold configurations
 DOMAIN_CONFIGS = {
     "medical": {"semantic_threshold": 0.99, "cross_encoder_threshold": 0.98},
@@ -31,15 +29,18 @@ DOMAIN_CONFIGS = {
 @st.cache_data(ttl=3000)
 def get_auth_headers():
     """Gets a Google-signed ID token and returns it in an auth header."""
-    credentials, project = google.auth.default()
-    auth_req = Request()
-    id_token = google.oauth2.id_token.fetch_id_token(auth_req, API_BASE_URL)
-    return {"Authorization": f"Bearer {id_token}"}
+   # credentials, project = google.auth.default()
+   # auth_req = Request()
+   # id_token = google.oauth2.id_token.fetch_id_token(auth_req, API_BASE_URL)
+   # return {"Authorization": f"Bearer {id_token}"}
+    return {} # No auth required for now
 
 def check_api_health():
     """Check if the API is accessible"""
     try:
-        response = requests.get(f"{API_BASE_URL}/health", timeout=5, headers=get_auth_headers())
+        # Add a spinner to indicate loading
+        with st.spinner("Cold starting the backend..."):
+            response = requests.get(f"{API_BASE_URL}/health", timeout=60, headers=get_auth_headers()) # Backend takes time to start
         return response.status_code == 200, response.json() if response.status_code == 200 else None
     except Exception as e:
         return False, str(e)

@@ -12,3 +12,5 @@ uvicorn>=0.34.3
 fastapi>=0.116.1
 python-multipart
 einops
+google-cloud-storage
+python-dotenv

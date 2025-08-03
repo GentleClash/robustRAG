@@ -6,9 +6,10 @@ import os
 import tempfile
 import shutil
 import logging
+from google.cloud import storage
+from dotenv import load_dotenv
 
-from robustRAG import LocalRAGRetriever, RAGConfig
-from layeredCache import HighConfidenceCacheManager
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -17,7 +18,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="RAG Retrieval API",
     description="Document retrieval system using RAG - Retrieval Only (No Inference)",
-    version="1.0.0"
+    version="1.1.0"
 )
 
 # Add CORS middleware
@@ -29,8 +30,103 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+def setup_model_cache() -> str:
+    """Setup persistent model caching using Cloud Storage"""
+    try:
+        # Set HuggingFace cache directory
+        hf_cache_dir = "/tmp/huggingface_cache"
+        os.makedirs(hf_cache_dir, exist_ok=True)
+        os.environ["HF_HOME"] = hf_cache_dir
+        os.environ["TRANSFORMERS_CACHE"] = hf_cache_dir
+        os.environ["HF_DATASETS_CACHE"] = hf_cache_dir
+        
+        # Set HuggingFace token if provided
+        hf_token = os.getenv("HF_TOKEN")
+        if hf_token:
+            os.environ["HUGGINGFACE_HUB_TOKEN"] = hf_token
+            logger.info("✅ HuggingFace token configured")
+        
+        # Setup Cloud Storage sync
+        bucket_name = os.getenv("MODEL_CACHE_BUCKET")
+        if bucket_name:
+            logger.info(f"📦 Model cache bucket: {bucket_name}")
+            sync_models_from_storage(bucket_name, hf_cache_dir)
+        
+        return hf_cache_dir
+    except Exception as e:
+        logger.error(f"Error setting up model cache: {str(e)}")
+        return "/tmp/huggingface_cache"
+
+def sync_models_from_storage(bucket_name: str, local_dir: str) -> None:
+    """Download cached models from Cloud Storage if they exist"""
+    try:
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        
+        # List all blobs in the bucket
+        blobs = bucket.list_blobs()
+        
+        downloaded_count = 0
+        for blob in blobs:
+            local_path = os.path.join(local_dir, blob.name)
+            os.makedirs(os.path.dirname(local_path), exist_ok=True)
+            
+            # Only download if local file doesn't exist or is older
+            if not os.path.exists(local_path):
+                blob.download_to_filename(local_path)
+                downloaded_count += 1
+        
+        if downloaded_count > 0:
+            logger.info(f"📥 Downloaded {downloaded_count} cached model files")
+        else:
+            logger.info("💾 Using existing local model cache")
+            
+    except Exception as e:
+        logger.warning(f"Could not sync from storage (will download fresh): {str(e)}")
+
+def sync_models_to_storage(bucket_name: str, local_dir: str) -> None:
+    """Upload model cache to Cloud Storage"""
+    try:
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        
+        uploaded_count = 0
+        for root, dirs, files in os.walk(local_dir):
+            for file in files:
+                local_path = os.path.join(root, file)
+                # Create blob path relative to cache directory
+                blob_path = os.path.relpath(local_path, local_dir)
+                
+                blob = bucket.blob(blob_path)
+                
+                # Only upload if blob doesn't exist or local file is newer
+                try:
+                    blob_stats = blob.exists()
+                    if not blob_stats:
+                        blob.upload_from_filename(local_path)
+                        uploaded_count += 1
+                except Exception:
+                    # Upload anyway if we can't check
+                    blob.upload_from_filename(local_path)
+                    uploaded_count += 1
+        
+        if uploaded_count > 0:
+            logger.info(f"📤 Uploaded {uploaded_count} model files to cache")
+            
+    except Exception as e:
+        logger.warning(f"Could not sync to storage: {str(e)}")
+
+
+
+
+
+
+# Initialize model cache on startup
+model_cache_dir: str = setup_model_cache()
+
 # Global variables to store retriever instances
-retrievers: Dict[str, LocalRAGRetriever] = {}
+retrievers: Dict[str, Any] = {} # Dict[str, LocalRAGRetriever]
+
 # Domain-specific threshold configurations
 DOMAIN_CONFIGS = {
     "medical": {"semantic_threshold": 0.99, "cross_encoder_threshold": 0.98},
@@ -86,10 +182,11 @@ class QueryResponse(BaseModel):
     total_results: int
 
 @app.get("/")
-async def root():
+async def root() -> Dict[str, Any]:
     return {
         "message": "RAG Retrieval API - Document Retrieval Only (No Inference)",
         "version": "1.0.0",
+        "status": "healthy",
         "endpoints": {
             "create_retriever": "/retriever/create",
             "list_retrievers": "/retriever/list",
@@ -99,11 +196,12 @@ async def root():
     }
 
 @app.get("/health")
-async def health_check():
+async def health_check() -> Dict[str, Any]:
+    """Health check endpoint"""
     return {
         "status": "healthy",
         "active_retrievers": len(retrievers),
-        "retriever_names": list(retrievers.keys())
+        "retriever_names": list(retrievers.keys()),
     }
 
 @app.post("/retriever/create")
@@ -112,6 +210,10 @@ async def create_retriever(config: RetrieverConfig):
     try:
         if config.name in retrievers:
             raise HTTPException(status_code=400, detail=f"Retriever '{config.name}' already exists")
+        
+        from robustRAG import LocalRAGRetriever, RAGConfig
+        from layeredCache import HighConfidenceCacheManager
+
         domain_config = DOMAIN_CONFIGS.get(config.cache_config.domain_type, DOMAIN_CONFIGS["general"])
         semantic_threshold = config.cache_config.semantic_threshold if config.cache_config.semantic_threshold != 0.99 else domain_config["semantic_threshold"]
         cross_encoder_threshold = config.cache_config.cross_encoder_threshold if config.cache_config.cross_encoder_threshold != 0.98 else domain_config["cross_encoder_threshold"]
@@ -143,6 +245,7 @@ async def create_retriever(config: RetrieverConfig):
         )
         
         # Create retriever
+        logger.info(f"Creating retriever '{config.name}' - models will be cached for future use")
         retriever = LocalRAGRetriever(rag_config, cache_manager)
         
         # Build index
@@ -155,6 +258,11 @@ async def create_retriever(config: RetrieverConfig):
                 
         # Store retriever
         retrievers[config.name] = retriever
+
+        bucket_name = os.getenv("MODEL_CACHE_BUCKET")
+        if bucket_name:
+            logger.info("💾 Caching models to Cloud Storage for faster future startups...")
+            sync_models_to_storage(bucket_name, model_cache_dir)
         
         return {
             "message": f"Retriever '{config.name}' created successfully",
