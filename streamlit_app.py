@@ -1,10 +1,10 @@
+import time
 import streamlit as st
 import requests
 import json
 from typing import Dict, Any
 import pandas as pd
 import os
-from google.auth.transport.requests import Request
 
 # Configure Streamlit page
 st.set_page_config(
@@ -26,9 +26,9 @@ DOMAIN_CONFIGS = {
 }
 
 
-@st.cache_data(ttl=3000)
+#@st.cache_data(ttl=3000)
 def get_auth_headers():
-    """Gets a Google-signed ID token and returns it in an auth header."""
+    """Gets a Google-signed ID token and returns it in an auth header. (DEPRECATED)"""
    # credentials, project = google.auth.default()
    # auth_req = Request()
    # id_token = google.oauth2.id_token.fetch_id_token(auth_req, API_BASE_URL)
@@ -93,8 +93,18 @@ def upload_files_and_create_retriever(name: str, files, rag_config: Dict, cache_
 st.title("🔍 RAG Retrieval System")
 st.markdown("**Document Retrieval Only - No Inference/Generation**")
 
-# Check API connectivity
+# Check API connectivity with retry logic
+backoff_time = 5
+max_backoff = 60
+total_wait = 0
 is_healthy, health_info = check_api_health()
+while not is_healthy and total_wait < max_backoff:
+    st.warning(f"Backend not started yet. Retrying in {backoff_time} seconds...")
+    time.sleep(backoff_time)
+    total_wait += backoff_time
+    is_healthy, health_info = check_api_health()
+    backoff_time = min(backoff_time+5, max_backoff - total_wait)
+
 if is_healthy:
     st.success(f"✅ API Connected - {health_info.get('active_retrievers', 0)} active retrievers")
 else:
@@ -175,7 +185,18 @@ elif tab == "Create Retriever":
         sources = [url.strip() for url in sources_text.split('\n') if url.strip()]
     else:
         uploaded_files = st.file_uploader("Upload Documents", accept_multiple_files=True, 
-                                         type=['pdf', 'txt', 'docx'])
+                                         type=[
+                                                'pdf',
+                                                'docx', 'dotx', 'docm', 'dotm',
+                                                'pptx', 'potx', 'ppsx', 'pptm', 'potm', 'ppsm',
+                                                'xlsx', 'xlsm',
+                                                'html', 'htm', 'xhtml',
+                                                'md',
+                                                'xml', 'txt', 'nxml',
+                                                'csv',
+                                                'jpg', 'jpeg', 'png', 'tif', 'tiff', 'bmp', 'webp'
+                                            ]
+        )
         sources = uploaded_files if uploaded_files else []
     
     # Configuration sections

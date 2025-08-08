@@ -6,8 +6,11 @@ import os
 import tempfile
 import shutil
 import logging
+import time
+import datetime
 from google.cloud import storage
 from dotenv import load_dotenv
+from pathlib import Path
 
 load_dotenv()
 
@@ -18,7 +21,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="RAG Retrieval API",
     description="Document retrieval system using RAG - Retrieval Only (No Inference)",
-    version="1.1.0"
+    version="1.1.5"
 )
 
 # Add CORS middleware
@@ -30,9 +33,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-def setup_model_cache() -> str:
-    """Setup persistent model caching using Cloud Storage"""
+def setup_model_cache(cache_age_hours: int = 24) -> str:
+    """
+    Simple timestamp-based cache management:
+    1. Check if local cache exists and is fresh
+    2. If not, download entire cache from GCS
+    3. Never upload - only download
+    """
     try:
+        # Setup credentials
         if os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON"):
             import base64
             key_data = base64.b64decode(os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON"))
@@ -40,11 +49,11 @@ def setup_model_cache() -> str:
                 f.write(key_data)
             os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "/tmp/service-account.json"
             logger.info("✅ Service account credentials loaded")
+        
         # Set HuggingFace cache directory
         hf_cache_dir = "/tmp/huggingface_cache"
         os.makedirs(hf_cache_dir, exist_ok=True)
         os.environ["HF_HOME"] = hf_cache_dir
-        os.environ["TRANSFORMERS_CACHE"] = hf_cache_dir
         os.environ["HF_DATASETS_CACHE"] = hf_cache_dir
         
         # Set HuggingFace token if provided
@@ -52,84 +61,166 @@ def setup_model_cache() -> str:
         if hf_token:
             logger.info("✅ HuggingFace token configured")
         
-        # Setup Cloud Storage sync
+        # Check cache freshness and sync if needed
         bucket_name = os.getenv("MODEL_CACHE_BUCKET")
         if bucket_name:
-            logger.info(f"📦 Model cache bucket: {bucket_name}")
-            sync_models_from_storage(bucket_name, hf_cache_dir)
+            cache_fresh = is_cache_fresh(hf_cache_dir, cache_age_hours)
+            
+            if cache_fresh:
+                logger.info(f"💾 Using fresh local cache (< {cache_age_hours}h old)")
+            else:
+                logger.info(f"📥 Local cache missing/stale, downloading from GCS bucket: {bucket_name}")
+                download_entire_cache(bucket_name, hf_cache_dir)
+        else:
+            logger.info("⚠️ No cache bucket configured, will download models fresh")
         
         return hf_cache_dir
+        
     except Exception as e:
         logger.error(f"Error setting up model cache: {str(e)}")
-        return "/tmp/huggingface_cache"
+        # Fallback to local directory
+        hf_cache_dir = "/tmp/huggingface_cache"
+        os.makedirs(hf_cache_dir, exist_ok=True)
+        return hf_cache_dir
 
-def sync_models_from_storage(bucket_name: str, local_dir: str) -> None:
-    """Download cached models from Cloud Storage if they exist"""
+def is_cache_fresh(cache_dir: str, max_age_hours: int) -> bool:
+    """
+    Check if local cache exists and is within age threshold
+    """
+    cache_path = Path(cache_dir)
+    
+    # Check if cache directory exists and has content
+    if not cache_path.exists() or not any(cache_path.iterdir()):
+        logger.info("📁 No local cache found")
+        return False
+    
+    # Check cache age using directory modification time
+    try:
+        cache_mtime = cache_path.stat().st_mtime
+        cache_age = time.time() - cache_mtime
+        age_hours = cache_age / 3600
+        
+        if age_hours < max_age_hours:
+            logger.info(f"✅ Cache is fresh ({age_hours:.1f}h old, threshold: {max_age_hours}h)")
+            return True
+        else:
+            logger.info(f"⏰ Cache is stale ({age_hours:.1f}h old, threshold: {max_age_hours}h)")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Error checking cache age: {e}")
+        return False
+
+def download_entire_cache(bucket_name: str, local_cache_dir: str) -> bool:
+    """
+    Download entire cache from GCS bucket, preserving directory structure
+    """
     try:
         client = storage.Client()
         bucket = client.bucket(bucket_name)
         
-        # List all blobs in the bucket
-        blobs = bucket.list_blobs()
+        # Clear existing cache to avoid conflicts
+        cache_path = Path(local_cache_dir)
+        if cache_path.exists():
+            logger.info("🧹 Clearing old cache...")
+            shutil.rmtree(cache_path)
+        cache_path.mkdir(parents=True, exist_ok=True)
+        
+        # Get all blobs and download
+        logger.info("📥 Downloading cache from GCS...")
+        blobs = list(bucket.list_blobs())
+        
+        if not blobs:
+            logger.warning("📭 Cache bucket is empty")
+            return False
         
         downloaded_count = 0
+        total_size = 0
+        
         for blob in blobs:
-            local_path = os.path.join(local_dir, blob.name)
-            os.makedirs(os.path.dirname(local_path), exist_ok=True)
-            
-            # Only download if local file doesn't exist or is older
-            if not os.path.exists(local_path):
-                blob.download_to_filename(local_path)
+            try:
+                # Create local path preserving bucket structure
+                local_path = cache_path / blob.name
+                local_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                # Download blob
+                blob.download_to_filename(str(local_path))
                 downloaded_count += 1
+                total_size += blob.size
+                
+                # Log progress periodically
+                if downloaded_count % 100 == 0:
+                    logger.info(f"📦 Downloaded {downloaded_count}/{len(blobs)} files...")
+                    
+            except Exception as e:
+                logger.error(f"Failed to download {blob.name}: {e}")
+                continue
         
-        if downloaded_count > 0:
-            logger.info(f"📥 Downloaded {downloaded_count} cached model files")
-        else:
-            logger.info("💾 Using existing local model cache")
-            
+        # Update cache directory timestamp to now
+        cache_path.touch()
+        
+        logger.info(f"✅ Cache download complete: {downloaded_count} files, {total_size / 1024 / 1024:.1f} MB")
+        return True
+        
     except Exception as e:
-        logger.warning(f"Could not sync from storage (will download fresh): {str(e)}")
+        logger.error(f"Failed to download cache: {e}")
+        return False
 
-def sync_models_to_storage(bucket_name: str, local_dir: str) -> None:
-    """Upload model cache to Cloud Storage"""
+def get_cache_info(cache_dir: str) -> dict:
+    """Get information about current cache state"""
+    cache_path = Path(cache_dir)
+    
+    if not cache_path.exists():
+        return {
+            "exists": False,
+            "age_hours": None,
+            "size_mb": 0,
+            "file_count": 0
+        }
+    
     try:
-        client = storage.Client()
-        bucket = client.bucket(bucket_name)
+        # Calculate cache age
+        cache_mtime = cache_path.stat().st_mtime
+        age_hours = (time.time() - cache_mtime) / 3600
         
-        uploaded_count = 0
-        for root, dirs, files in os.walk(local_dir):
+        # Calculate cache size and file count
+        total_size = 0
+        file_count = 0
+        
+        for root, dirs, files in os.walk(cache_path):
             for file in files:
-                local_path = os.path.join(root, file)
-                # Create blob path relative to cache directory
-                blob_path = os.path.relpath(local_path, local_dir)
-                
-                blob = bucket.blob(blob_path)
-                
-                # Only upload if blob doesn't exist or local file is newer
+                file_path = os.path.join(root, file)
                 try:
-                    blob_stats = blob.exists()
-                    if not blob_stats:
-                        blob.upload_from_filename(local_path)
-                        uploaded_count += 1
-                except Exception:
-                    # Upload anyway if we can't check
-                    blob.upload_from_filename(local_path)
-                    uploaded_count += 1
+                    total_size += os.path.getsize(file_path)
+                    file_count += 1
+                except:
+                    continue
         
-        if uploaded_count > 0:
-            logger.info(f"📤 Uploaded {uploaded_count} model files to cache")
-            
+        return {
+            "exists": True,
+            "age_hours": age_hours,
+            "size_mb": total_size / 1024 / 1024,
+            "file_count": file_count,
+            "last_updated": datetime.fromtimestamp(cache_mtime).isoformat()
+        }
+        
     except Exception as e:
-        logger.warning(f"Could not sync to storage: {str(e)}")
+        logger.error(f"Error getting cache info: {e}")
+        return {
+            "exists": True,
+            "age_hours": None,
+            "size_mb": 0,
+            "file_count": 0,
+            "error": str(e)
+        }
 
 
-
-def prewarm_models():
+def prewarm_models() -> None:
     """Pre-download models at startup to avoid runtime delays"""
     try:
         from sentence_transformers import SentenceTransformer
         logger.info("🔥 Pre-warming embedding model...")
-        model = SentenceTransformer(DEFAULT_EMBEDDING_MODEL, trust_remote_code=True)
+        model = SentenceTransformer("nomic-AI/nomic-embed-text-v1.5", trust_remote_code=True)
         logger.info("✅ Embedding model ready")
     except Exception as e:
         logger.warning(f"Pre-warming failed: {e}")
@@ -273,11 +364,6 @@ async def create_retriever(config: RetrieverConfig):
                 
         # Store retriever
         retrievers[config.name] = retriever
-
-        bucket_name = os.getenv("MODEL_CACHE_BUCKET")
-        if bucket_name:
-            logger.info("💾 Caching models to Cloud Storage for faster future startups...")
-            sync_models_to_storage(bucket_name, model_cache_dir)
         
         return {
             "message": f"Retriever '{config.name}' created successfully",
@@ -333,7 +419,7 @@ async def upload_and_create_retriever(
         raise HTTPException(status_code=500, detail=f"Failed to upload and create retriever: {str(e)}")
 
 @app.get("/retriever/list")
-async def list_retrievers():
+async def list_retrievers() -> Dict[str, Any]:
     """List all available retriever instances"""
     return {
         "retrievers": list(retrievers.keys()),

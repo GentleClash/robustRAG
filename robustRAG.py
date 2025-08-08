@@ -1,11 +1,21 @@
 import json
 import os
+import shutil
 import traceback
 import requests
 import numpy as np
 import faiss
 import torch.nn.functional as F
-from docling.document_converter import DocumentConverter
+from docling.document_converter import (
+    DocumentConverter, PdfFormatOption, WordFormatOption, PowerpointFormatOption,
+    ExcelFormatOption, HTMLFormatOption, MarkdownFormatOption, PatentUsptoFormatOption,
+    XMLJatsFormatOption, CsvFormatOption, ImageFormatOption
+)
+from docling.datamodel.pipeline_options import (
+    PdfPipelineOptions, PaginatedPipelineOptions
+)
+from docling.datamodel.base_models import InputFormat
+from docling.datamodel.pipeline_options import smolvlm_picture_description
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from sentence_transformers import SentenceTransformer, CrossEncoder
 from transformers import AutoTokenizer
@@ -31,6 +41,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Configuring PDF pipeline options with OCR, table structure, layout, and picture description
+pdf_opts = PdfPipelineOptions()
+pdf_opts.do_picture_description = True
+pdf_opts.do_table_structure = True
+pdf_opts.do_ocr = True
+pdf_opts.picture_description_options = smolvlm_picture_description
+pdf_opts.layout_options.create_orphan_clusters = True
+pdf_opts.layout_options.keep_empty_clusters = False
+
+# Configuring paginated document options for others (DOCX, PPTX, XLSX, etc.)
+paginated_opts = PaginatedPipelineOptions()
 
 @dataclass
 class RAGConfig:
@@ -291,7 +312,25 @@ class LocalRAGRetriever:
                 markdown_content = cached_parsed.get("content", "")
             else:
                 # Parse document and cache result
-                converter = DocumentConverter()
+                converter = DocumentConverter(
+                                allowed_formats=[
+                                    InputFormat.PDF, InputFormat.DOCX, InputFormat.PPTX, InputFormat.XLSX,
+                                    InputFormat.HTML, InputFormat.MD, InputFormat.XML_USPTO, InputFormat.XML_JATS,
+                                    InputFormat.CSV, InputFormat.IMAGE
+                                ],
+                                format_options={
+                                    InputFormat.PDF: PdfFormatOption(pipeline_options=pdf_opts),
+                                    InputFormat.DOCX: WordFormatOption(pipeline_options=paginated_opts),
+                                    InputFormat.PPTX: PowerpointFormatOption(pipeline_options=paginated_opts),
+                                    InputFormat.XLSX: ExcelFormatOption(pipeline_options=paginated_opts),
+                                    InputFormat.HTML: HTMLFormatOption(pipeline_options=paginated_opts),
+                                    InputFormat.MD: MarkdownFormatOption(pipeline_options=paginated_opts),
+                                    InputFormat.XML_USPTO: PatentUsptoFormatOption(pipeline_options=paginated_opts),
+                                    InputFormat.XML_JATS: XMLJatsFormatOption(pipeline_options=paginated_opts),
+                                    InputFormat.CSV: CsvFormatOption(),  
+                                    InputFormat.IMAGE: ImageFormatOption(pipeline_options=pdf_opts), 
+                                }
+                    )
                 result = converter.convert(local_path)
                 markdown_content = result.document.export_to_markdown()
                 
@@ -416,11 +455,11 @@ class LocalRAGRetriever:
         return embeddings
 
     def build_index(self, sources: Optional[List[str]], 
-                    local_filenames: Optional[List[str]]=[], 
-                    chunk_size: Optional[int] = None, 
-                    chunk_overlap: Optional[int] = None) -> None:
+                local_filenames: Optional[List[str]]=[], 
+                chunk_size: Optional[int] = None, 
+                chunk_overlap: Optional[int] = None) -> None:
         """
-            Build a RAG index from documents with flexible input handling.
+        Build a RAG index from documents with flexible input handling.
 
         Args:
             sources (List[str], optional): List of URLs or local file paths to process.
@@ -468,9 +507,9 @@ class LocalRAGRetriever:
         if isinstance(sources, str):
             sources = [sources]  # Backward compatibility
 
+        doc_dir = "documents"
         # Neither sources nor local_filenames provided then look for all documents in "documents/" directory
         if sources is None and local_filenames is None:
-            doc_dir = "documents"
             if os.path.exists(doc_dir):
                 local_filenames = [f for f in os.listdir(doc_dir) if f.lower().endswith(('.pdf', '.txt', '.md', '.docx'))]
                 if local_filenames:
@@ -488,7 +527,6 @@ class LocalRAGRetriever:
             if isinstance(local_filenames, str):
                 local_filenames = [local_filenames]
             
-            doc_dir = "documents"
             sources = []
             for filename in local_filenames:
                 # Check if it's already a full path
@@ -504,42 +542,62 @@ class LocalRAGRetriever:
         
         # If sources provided, ensure they are valid URLs or local paths
         else:
+            # Copy uploaded files to documents directory if they're not there already
+            processed_sources = []
+            processed_filenames = []
+            
             if local_filenames is None:
                 local_filenames = []
-                for i, source in enumerate(sources):
-                    if self.is_url(source):
-                        # Extract filename from URL or use default
+            
+            for i, source in enumerate(sources):
+                if self.is_url(source):
+                    # Handle URL - extract filename from URL or use default
+                    if i < len(local_filenames):
+                        filename = local_filenames[i]
+                    else:
                         try:
                             filename = source.split('/')[-1]
                             if not filename or '.' not in filename:
                                 filename = f"document_{i}.pdf"
                         except:
                             filename = f"document_{i}.pdf"
+                    
+                    processed_sources.append(source)
+                    processed_filenames.append(filename)
+                    
+                else:
+                    # Handle local file path
+                    if os.path.exists(source):
+                        # Get desired filename
+                        if i < len(local_filenames):
+                            filename = local_filenames[i]
+                        else:
+                            filename = os.path.basename(source)
+                        
+                        # Check if file is already in documents directory
+                        doc_path = os.path.join(doc_dir, filename)
+                        
+                        if os.path.abspath(source) != os.path.abspath(doc_path):
+                            # File is outside documents directory, copy it
+                            logger.info(f"Copying {source} to {doc_path}")
+                            try:
+                                shutil.copy2(source, doc_path)
+                            except Exception as e:
+                                logger.error(f"Failed to copy {source} to {doc_path}: {e}")
+                                return
+                        
+                        # Use the documents directory path as source
+                        processed_sources.append(doc_path)
+                        processed_filenames.append(filename)
+                        
                     else:
-                        # Use the original filename for local files
-                        filename = os.path.basename(source)
-                    local_filenames.append(filename)
-                logger.info(f"Auto-generated {len(local_filenames)} filenames for sources")
+                        logger.error(f"Source file not found: {source}")
+                        return
             
-            elif len(local_filenames) < len(sources):
-                # Extend local_filenames to match sources length
-                for i in range(len(local_filenames), len(sources)):
-                    source = sources[i]
-                    if self.is_url(source):
-                        try:
-                            filename = source.split('/')[-1]
-                            if not filename or '.' not in filename:
-                                filename = f"document_{i}.pdf"
-                        except:
-                            filename = f"document_{i}.pdf"
-                    else:
-                        filename = os.path.basename(source)
-                    local_filenames.append(filename)
-                logger.info(f"Extended filenames list to match {len(sources)} sources")
+            sources = processed_sources
+            local_filenames = processed_filenames
             
-            elif len(local_filenames) > len(sources):
-                logger.warning(f"More filenames ({len(local_filenames)}) than sources ({len(sources)}), truncating filenames")
-                local_filenames = local_filenames[:len(sources)]
+            logger.info(f"Processed {len(sources)} sources with {len(local_filenames)} filenames")
         
         # Validate final state
         if len(sources) != len(local_filenames):
@@ -578,7 +636,7 @@ class LocalRAGRetriever:
         
             # Store document hash for caching
             if self.is_url(source):
-                local_path = os.path.join("documents", filename)
+                local_path = os.path.join(doc_dir, filename)
                 if os.path.exists(local_path):
                     file_hash: str | None = self.get_file_hash(local_path)
                     document_hashes.append(file_hash)
@@ -586,7 +644,9 @@ class LocalRAGRetriever:
                     logger.warning(f"Downloaded file not found for hash calculation: {local_path}")
                     document_hashes.append("missing_file")
             else:
-                file_hash: str = self.get_file_hash(os.path.join("documents", filename))
+                # For local files, use the documents directory path
+                local_path = os.path.join(doc_dir, filename) if not source.startswith(doc_dir) else source
+                file_hash: str = self.get_file_hash(local_path)
                 document_hashes.append(file_hash)
             
         composite_hash_input = {
@@ -605,7 +665,7 @@ class LocalRAGRetriever:
         # Update cache manager with actual chunk count
         if self.cache_manager:
             self.cache_manager.update_kb_version(
-                document_paths=[os.path.join("documents", fn) for fn in local_filenames],
+                document_paths=[os.path.join(doc_dir, fn) for fn in local_filenames],
                 total_chunks=len(all_chunks),
                 embedding_model=self.embed_model._modules['0'].auto_model.name_or_path if hasattr(self.embed_model, '_modules') else "unknown",
                 chunk_params={'chunk_size': chunk_size, 'chunk_overlap': chunk_overlap}
