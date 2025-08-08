@@ -41,18 +41,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Configuring PDF pipeline options with OCR, table structure, layout, and picture description
-pdf_opts = PdfPipelineOptions()
-pdf_opts.do_picture_description = True
-pdf_opts.do_table_structure = True
-pdf_opts.do_ocr = True
-pdf_opts.picture_description_options = smolvlm_picture_description
-pdf_opts.layout_options.create_orphan_clusters = True
-pdf_opts.layout_options.keep_empty_clusters = False
-
-# Configuring paginated document options for others (DOCX, PPTX, XLSX, etc.)
-paginated_opts = PaginatedPipelineOptions()
-
 @dataclass
 class RAGConfig:
     embed_model: str = "nomic-ai/nomic-embed-text-v1.5"
@@ -90,8 +78,13 @@ class LocalRAGRetriever:
         
         logger.info("Loading embedding model...")
         embed_start = time.time()
-        self.embed_model = SentenceTransformer(self.config.embed_model, trust_remote_code=True)
-        self._tokenizer: Optional[AutoTokenizer] = None 
+        try:
+            self.embed_model = SentenceTransformer(self.config.embed_model, trust_remote_code=True, cache_folder="/tmp/huggingface_cache", local_files_only=True)
+            logger.info(f"      - Using local files only for sentence transformer")
+        except:
+            self.embed_model = SentenceTransformer(self.config.embed_model, trust_remote_code=True, cache_folder="/tmp/huggingface_cache")
+            logger.info(f"      - Using online files for sentence transformer")
+        self._tokenizer: Optional[AutoTokenizer] = None
         embed_time = time.time() - embed_start
         logger.info(f"✓ Embedding model loaded in {embed_time:.2f}s")
         logger.info(f"  - Model max sequence length: {self.embed_model.max_seq_length}")
@@ -117,7 +110,19 @@ class LocalRAGRetriever:
         total_time = time.time() - start_time
         logger.info(f"✓ LocalRAGRetriever initialization complete in {total_time:.2f}s")
         logger.info("=" * 60)
-    
+
+        # Configuring PDF pipeline options with OCR, table structure, layout, and picture description
+        self.pdf_opts = PdfPipelineOptions()
+        self.pdf_opts.do_picture_description = True
+        self.pdf_opts.do_table_structure = True
+        self.pdf_opts.do_ocr = True
+        self.pdf_opts.picture_description_options = smolvlm_picture_description
+        self.pdf_opts.layout_options.create_orphan_clusters = True
+        self.pdf_opts.layout_options.keep_empty_clusters = False
+
+        # Configuring paginated document options for others (DOCX, PPTX, XLSX, etc.)
+        self.paginated_opts = PaginatedPipelineOptions()
+
     @staticmethod
     def is_url(text: str) -> bool:
         try:
@@ -131,11 +136,16 @@ class LocalRAGRetriever:
         """Lazy-load and cache the tokenizer."""
         if self._tokenizer is None:
             try:
-                self._tokenizer: AutoTokenizer = AutoTokenizer.from_pretrained("bert-base-uncased", trust_remote_code=True)
+                try: # Offline availability
+                    self._tokenizer: AutoTokenizer = AutoTokenizer.from_pretrained("bert-base-uncased", trust_remote_code=True, cache_dir="/tmp/huggingface_cache", local_files_only=True)
+                    logger.info(f"      - Using local files only for tokenizer")
+                except:
+                    self._tokenizer: AutoTokenizer = AutoTokenizer.from_pretrained("bert-base-uncased", trust_remote_code=True, cache_dir="/tmp/huggingface_cache")
+                    logger.info(f"      - Using online files for tokenizer")
             except Exception as e:
                 logger.error(f"Error loading tokenizer: {e}")
                 raise Exception("Please ensure you have the 'transformers' library installed: pip install transformers")
-        return self._tokenizer
+        return self._tokenizer  
 
     def chunk_text(self, markdown_content: str, chunk_size: int, chunk_overlap: int) -> List[str]:
         """
@@ -319,16 +329,16 @@ class LocalRAGRetriever:
                                     InputFormat.CSV, InputFormat.IMAGE
                                 ],
                                 format_options={
-                                    InputFormat.PDF: PdfFormatOption(pipeline_options=pdf_opts),
-                                    InputFormat.DOCX: WordFormatOption(pipeline_options=paginated_opts),
-                                    InputFormat.PPTX: PowerpointFormatOption(pipeline_options=paginated_opts),
-                                    InputFormat.XLSX: ExcelFormatOption(pipeline_options=paginated_opts),
-                                    InputFormat.HTML: HTMLFormatOption(pipeline_options=paginated_opts),
-                                    InputFormat.MD: MarkdownFormatOption(pipeline_options=paginated_opts),
-                                    InputFormat.XML_USPTO: PatentUsptoFormatOption(pipeline_options=paginated_opts),
-                                    InputFormat.XML_JATS: XMLJatsFormatOption(pipeline_options=paginated_opts),
-                                    InputFormat.CSV: CsvFormatOption(),  
-                                    InputFormat.IMAGE: ImageFormatOption(pipeline_options=pdf_opts), 
+                                    InputFormat.PDF: PdfFormatOption(pipeline_options=self.pdf_opts),
+                                    InputFormat.DOCX: WordFormatOption(pipeline_options=self.paginated_opts),
+                                    InputFormat.PPTX: PowerpointFormatOption(pipeline_options=self.paginated_opts),
+                                    InputFormat.XLSX: ExcelFormatOption(pipeline_options=self.paginated_opts),
+                                    InputFormat.HTML: HTMLFormatOption(pipeline_options=self.paginated_opts),
+                                    InputFormat.MD: MarkdownFormatOption(pipeline_options=self.paginated_opts),
+                                    InputFormat.XML_USPTO: PatentUsptoFormatOption(pipeline_options=self.paginated_opts),
+                                    InputFormat.XML_JATS: XMLJatsFormatOption(pipeline_options=self.paginated_opts),
+                                    InputFormat.CSV: CsvFormatOption(),
+                                    InputFormat.IMAGE: ImageFormatOption(pipeline_options=self.pdf_opts),
                                 }
                     )
                 result = converter.convert(local_path)
@@ -576,7 +586,8 @@ class LocalRAGRetriever:
                         
                         # Check if file is already in documents directory
                         doc_path = os.path.join(doc_dir, filename)
-                        
+                        os.makedirs(doc_dir, exist_ok=True)
+
                         if os.path.abspath(source) != os.path.abspath(doc_path):
                             # File is outside documents directory, copy it
                             logger.info(f"Copying {source} to {doc_path}")

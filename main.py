@@ -220,7 +220,12 @@ def prewarm_models() -> None:
     try:
         from sentence_transformers import SentenceTransformer
         logger.info("🔥 Pre-warming embedding model...")
-        model = SentenceTransformer("nomic-AI/nomic-embed-text-v1.5", trust_remote_code=True)
+        try:
+            model = SentenceTransformer("nomic-AI/nomic-embed-text-v1.5", trust_remote_code=True, local_files_only=True)
+            logger.info("   ✅ Used offline model")
+        except Exception as e:
+            model = SentenceTransformer("nomic-AI/nomic-embed-text-v1.5", trust_remote_code=True, )
+            logger.info("   ✅ Used online model")
         logger.info("✅ Embedding model ready")
     except Exception as e:
         logger.warning(f"Pre-warming failed: {e}")
