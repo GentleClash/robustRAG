@@ -1,3 +1,4 @@
+import base64
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -7,8 +8,6 @@ import tempfile
 import shutil
 import logging
 import time
-import datetime
-from google.cloud import storage
 from dotenv import load_dotenv
 from pathlib import Path
 
@@ -33,206 +32,167 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-def setup_model_cache(cache_age_hours: int = 24) -> str:
-    """
-    Simple timestamp-based cache management:
-    1. Check if local cache exists and is fresh
-    2. If not, download entire cache from GCS
-    3. Never upload - only download
-    """
-    try:
-        # Setup credentials
-        if os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON"):
-            import base64
-            key_data = base64.b64decode(os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON"))
-            with open("/tmp/service-account.json", "wb") as f:
-                f.write(key_data)
-            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "/tmp/service-account.json"
-            logger.info("✅ Service account credentials loaded")
-        
-        # Set HuggingFace cache directory
-        hf_cache_dir = "/tmp/huggingface_cache"
-        os.makedirs(hf_cache_dir, exist_ok=True)
-        os.environ["HF_HOME"] = hf_cache_dir
-        os.environ["HF_DATASETS_CACHE"] = hf_cache_dir
-        
-        # Set HuggingFace token if provided
-        hf_token = os.getenv("HF_TOKEN")
-        if hf_token:
-            logger.info("✅ HuggingFace token configured")
-        
-        # Check cache freshness and sync if needed
-        bucket_name = os.getenv("MODEL_CACHE_BUCKET")
-        if bucket_name:
-            cache_fresh = is_cache_fresh(hf_cache_dir, cache_age_hours)
-            
-            if cache_fresh:
-                logger.info(f"💾 Using fresh local cache (< {cache_age_hours}h old)")
-            else:
-                logger.info(f"📥 Local cache missing/stale, downloading from GCS bucket: {bucket_name}")
-                download_entire_cache(bucket_name, hf_cache_dir)
-        else:
-            logger.info("⚠️ No cache bucket configured, will download models fresh")
-        
-        return hf_cache_dir
-        
-    except Exception as e:
-        logger.error(f"Error setting up model cache: {str(e)}")
-        # Fallback to local directory
-        hf_cache_dir = "/tmp/huggingface_cache"
-        os.makedirs(hf_cache_dir, exist_ok=True)
-        return hf_cache_dir
+LOCAL_CACHE_DIR = Path("/tmp/app_model_cache")
+DEFAULT_CACHE_AGE_HOURS = 24 
 
-def is_cache_fresh(cache_dir: str, max_age_hours: int) -> bool:
-    """
-    Check if local cache exists and is within age threshold
-    """
-    cache_path = Path(cache_dir)
-    
-    # Check if cache directory exists and has content
-    if not cache_path.exists() or not any(cache_path.iterdir()):
-        logger.info("📁 No local cache found")
+def is_cache_fresh(cache_dir: Path, max_age_hours: int) -> bool:
+    """Checks if the local cache directory exists and is within the age threshold."""
+    if not cache_dir.exists() or not any(cache_dir.iterdir()):
+        logging.info("📁 No local cache found.")
         return False
-    
-    # Check cache age using directory modification time
+
     try:
-        cache_mtime = cache_path.stat().st_mtime
-        cache_age = time.time() - cache_mtime
-        age_hours = cache_age / 3600
-        
+        # Check cache age using the main directory's modification time
+        cache_mtime = cache_dir.stat().st_mtime
+        cache_age_seconds = time.time() - cache_mtime
+        age_hours = cache_age_seconds / 3600
+
         if age_hours < max_age_hours:
-            logger.info(f"✅ Cache is fresh ({age_hours:.1f}h old, threshold: {max_age_hours}h)")
+            logging.info(f"✅ Cache is fresh ({age_hours:.1f}h old, threshold: {max_age_hours}h).")
             return True
         else:
-            logger.info(f"⏰ Cache is stale ({age_hours:.1f}h old, threshold: {max_age_hours}h)")
+            logging.info(f"⏰ Cache is stale ({age_hours:.1f}h old, threshold: {max_age_hours}h).")
             return False
-            
     except Exception as e:
-        logger.error(f"Error checking cache age: {e}")
+        logging.error(f"Error checking cache age: {e}")
         return False
 
-def download_entire_cache(bucket_name: str, local_cache_dir: str) -> bool:
-    """
-    Download entire cache from GCS bucket, preserving directory structure
-    """
+def download_cache_from_gcs(bucket_name: str, local_dir: Path) -> bool:
+    """Downloads the entire cache from a GCS bucket, clearing the old cache first."""
+    from google.cloud import storage
+
     try:
         client = storage.Client()
         bucket = client.bucket(bucket_name)
-        
-        # Clear existing cache to avoid conflicts
-        cache_path = Path(local_cache_dir)
-        if cache_path.exists():
-            logger.info("🧹 Clearing old cache...")
-            shutil.rmtree(cache_path)
-        cache_path.mkdir(parents=True, exist_ok=True)
-        
-        # Get all blobs and download
-        logger.info("📥 Downloading cache from GCS...")
+
+        # Clear existing cache to ensure a clean slate
+        if local_dir.exists():
+            logging.info(f"🧹 Clearing stale cache at {local_dir}...")
+            shutil.rmtree(local_dir)
+        local_dir.mkdir(parents=True, exist_ok=True)
+
+        logging.info(f"📥 Downloading cache from GCS bucket: gs://{bucket_name}...")
         blobs = list(bucket.list_blobs())
-        
+
         if not blobs:
-            logger.warning("📭 Cache bucket is empty")
+            logging.warning("📭 GCS cache bucket is empty.")
             return False
-        
-        downloaded_count = 0
-        total_size = 0
-        
-        for blob in blobs:
-            try:
-                # Create local path preserving bucket structure
-                local_path = cache_path / blob.name
-                local_path.parent.mkdir(parents=True, exist_ok=True)
-                
-                # Download blob
-                blob.download_to_filename(str(local_path))
-                downloaded_count += 1
-                total_size += blob.size
-                
-                # Log progress periodically
-                if downloaded_count % 100 == 0:
-                    logger.info(f"📦 Downloaded {downloaded_count}/{len(blobs)} files...")
-                    
-            except Exception as e:
-                logger.error(f"Failed to download {blob.name}: {e}")
-                continue
-        
-        # Update cache directory timestamp to now
-        cache_path.touch()
-        
-        logger.info(f"✅ Cache download complete: {downloaded_count} files, {total_size / 1024 / 1024:.1f} MB")
+
+        for i, blob in enumerate(blobs):
+            local_path = local_dir / blob.name
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            blob.download_to_filename(str(local_path))
+            if (i + 1) % 100 == 0:
+                 logging.info(f"📦 Downloaded {i + 1}/{len(blobs)} files...")
+
+
+        local_dir.touch()
+        logging.info(f"✅ Cache download complete. {len(blobs)} files synced.")
         return True
-        
+
     except Exception as e:
-        logger.error(f"Failed to download cache: {e}")
+        logging.error(f"💥 Failed to download cache from GCS: {e}")
         return False
 
-def get_cache_info(cache_dir: str) -> dict:
-    """Get information about current cache state"""
-    cache_path = Path(cache_dir)
-    
-    if not cache_path.exists():
-        return {
-            "exists": False,
-            "age_hours": None,
-            "size_mb": 0,
-            "file_count": 0
-        }
-    
-    try:
-        # Calculate cache age
-        cache_mtime = cache_path.stat().st_mtime
-        age_hours = (time.time() - cache_mtime) / 3600
-        
-        # Calculate cache size and file count
-        total_size = 0
-        file_count = 0
-        
-        for root, dirs, files in os.walk(cache_path):
-            for file in files:
-                file_path = os.path.join(root, file)
-                try:
-                    total_size += os.path.getsize(file_path)
-                    file_count += 1
-                except:
-                    continue
-        
-        return {
-            "exists": True,
-            "age_hours": age_hours,
-            "size_mb": total_size / 1024 / 1024,
-            "file_count": file_count,
-            "last_updated": datetime.fromtimestamp(cache_mtime).isoformat()
-        }
-        
-    except Exception as e:
-        logger.error(f"Error getting cache info: {e}")
-        return {
-            "exists": True,
-            "age_hours": None,
-            "size_mb": 0,
-            "file_count": 0,
-            "error": str(e)
-        }
+def initialize_cache_and_offline_env(cache_age_hours: int = DEFAULT_CACHE_AGE_HOURS):
+    """
+    Initializes the application environment for offline model usage.
 
+    This function performs the following steps:
+    1. Sets up Google Cloud credentials.
+    2. Checks if the local model cache is fresh based on a TTL (Time-To-Live).
+    3. If the cache is missing or stale, it downloads the latest version from GCS.
+    4. Sets environment variables to force all supported libraries (Hugging Face, Docling)
+       to use the local cache in a strict offline mode.
+    """
+    logging.info("🚀 Initializing model cache and offline environment...")
 
-def prewarm_models() -> None:
-    """Pre-download models at startup to avoid runtime delays"""
-    try:
-        from sentence_transformers import SentenceTransformer
-        logger.info("🔥 Pre-warming embedding model...")
+    # 1. Setup GCS credentials if provided as a base64 JSON
+    if os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON"):
         try:
-            model = SentenceTransformer("nomic-AI/nomic-embed-text-v1.5", trust_remote_code=True, local_files_only=True)
-            logger.info("   ✅ Used offline model")
+            key_data = base64.b64decode(os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON"))
+            cred_path = "/tmp/gcs-service-account.json"
+            with open(cred_path, "wb") as f:
+                f.write(key_data)
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = cred_path
+            logging.info("✅ Service account credentials loaded from ENV var.")
         except Exception as e:
-            model = SentenceTransformer("nomic-AI/nomic-embed-text-v1.5", trust_remote_code=True, )
-            logger.info("   ✅ Used online model")
-        logger.info("✅ Embedding model ready")
+            logging.error(f"Failed to decode GCS credentials: {e}")
+
+    # 2. Sync cache from GCS if it's stale or missing
+    bucket_name = os.getenv("MODEL_CACHE_BUCKET")
+    if not bucket_name:
+        logging.warning("⚠️ MODEL_CACHE_BUCKET not set. Skipping GCS sync. Models must be manually cached.")
+    else:
+        if not is_cache_fresh(LOCAL_CACHE_DIR, cache_age_hours):
+            download_cache_from_gcs(bucket_name, LOCAL_CACHE_DIR)
+
+    # 3. Point all libraries to the correct subdirectories in the local cache
+    hf_cache_path = LOCAL_CACHE_DIR / "huggingface"
+    docling_cache_path = LOCAL_CACHE_DIR / "docling"
+    
+    # Create subdirectories if they don't exist
+    hf_cache_path.mkdir(parents=True, exist_ok=True)
+    docling_cache_path.mkdir(parents=True, exist_ok=True)
+
+    os.environ["HF_HOME"] = str(hf_cache_path)
+    os.environ["HF_DATASETS_CACHE"] = str(hf_cache_path / "datasets")
+    os.environ["HF_HUB_OFFLINE"] = "1"
+
+    os.environ["SENTENCE_TRANSFORMERS_HOME"] = str(hf_cache_path)
+
+    os.environ["DOCLING_ARTIFACTS_PATH"] = str(docling_cache_path)
+
+    logging.info(f"HF_HOME set to: {os.getenv('HF_HOME')}")
+    logging.info(f"DOCLING_ARTIFACTS_PATH set to: {os.getenv('DOCLING_ARTIFACTS_PATH')}")
+    logging.info("✅ Environment is now configured for OFFLINE model loading.")
+
+
+def prewarm_models():
+    """
+    Pre-loads models at startup to avoid runtime delays.
+    This will fail if models are not in the cache due to the offline setting.
+    """
+    try:
+        from transformers import AutoTokenizer
+        from sentence_transformers import SentenceTransformer
+
+        logging.info("🔥 Pre-warming models (offline)...")
+
+        # This call will look ONLY in the local cache.
+        # It will fail if "bert-base-uncased" is not present.
+        tokenizer = AutoTokenizer.from_pretrained(
+            "bert-base-uncased",
+            local_files_only=True
+        )
+        logging.info("   ✅ Tokenizer 'bert-base-uncased' ready.")
+
+        model = SentenceTransformer(
+            "nomic-ai/nomic-embed-text-v1.5",
+            trust_remote_code=True,
+            local_files_only=True
+        )
+        logging.info("   ✅ Embedding model 'nomic-embed-text-v1.5' ready.")
+
+        logging.info("✅ All models pre-warmed successfully from local cache.")
+
     except Exception as e:
-        logger.warning(f"Pre-warming failed: {e}")
+        # This error is expected if the models aren't in the GCS bucket/local cache.
+        logging.error(f"💥 Pre-warming failed. Ensure required models are in the cache bucket. Error: {e}")
+        tokenizer = AutoTokenizer.from_pretrained(
+            "bert-base-uncased", trust_remote_code=True
+        )
+        logging.info("   ✅ Tokenizer 'bert-base-uncased' ready.")
+
+        model = SentenceTransformer(
+            "nomic-ai/nomic-embed-text-v1.5",
+            trust_remote_code=True
+        )
+        logging.info("   ✅ Embedding model 'nomic-embed-text-v1.5' ready.")
 
 
 # Initialize model cache on startup
-model_cache_dir: str = setup_model_cache()
+initialize_cache_and_offline_env()
 prewarm_models()
 
 # Global variables to store retriever instances

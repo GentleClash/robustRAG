@@ -19,6 +19,7 @@ from docling.datamodel.pipeline_options import smolvlm_picture_description
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from sentence_transformers import SentenceTransformer, CrossEncoder
 from transformers import AutoTokenizer
+from torch import cuda
 import logging
 import time
 from datetime import datetime
@@ -29,6 +30,8 @@ from layeredCache import HighConfidenceCacheManager
 import xxhash
 from tqdm import tqdm
 from dataclasses import dataclass
+from dotenv import load_dotenv
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(
@@ -79,10 +82,10 @@ class LocalRAGRetriever:
         logger.info("Loading embedding model...")
         embed_start = time.time()
         try:
-            self.embed_model = SentenceTransformer(self.config.embed_model, trust_remote_code=True, cache_folder="/tmp/huggingface_cache", local_files_only=True)
+            self.embed_model = SentenceTransformer(self.config.embed_model, trust_remote_code=True, local_files_only=True)
             logger.info(f"      - Using local files only for sentence transformer")
         except:
-            self.embed_model = SentenceTransformer(self.config.embed_model, trust_remote_code=True, cache_folder="/tmp/huggingface_cache")
+            self.embed_model = SentenceTransformer(self.config.embed_model, trust_remote_code=True)
             logger.info(f"      - Using online files for sentence transformer")
         self._tokenizer: Optional[AutoTokenizer] = None
         embed_time = time.time() - embed_start
@@ -112,16 +115,31 @@ class LocalRAGRetriever:
         logger.info("=" * 60)
 
         # Configuring PDF pipeline options with OCR, table structure, layout, and picture description
-        self.pdf_opts = PdfPipelineOptions()
+
+        artifacts_path = os.environ.get("DOCLING_ARTIFACTS_PATH", None)
+        if artifacts_path:
+            self.pdf_opts = PdfPipelineOptions(artifacts_path=artifacts_path) # Air gapped
+            self.paginated_opts = PaginatedPipelineOptions(artifacts_path=artifacts_path) # Air gapped
+        else:
+            self.pdf_opts = PdfPipelineOptions()
+            self.paginated_opts = PaginatedPipelineOptions()
+        if cuda.is_available():
+            from docling.datamodel.accelerator_options import AcceleratorDevice, AcceleratorOptions
+            accelerator_options = AcceleratorOptions(
+                                    device=AcceleratorDevice.CUDA,
+                                    num_threads=8
+                                )
+            logger.info(f"Using CUDA for acceleration with {accelerator_options.num_threads} threads")
+            self.pdf_opts.accelerator_options = accelerator_options
+            self.paginated_opts.accelerator_options = accelerator_options
+
         self.pdf_opts.do_picture_description = True
         self.pdf_opts.do_table_structure = True
         self.pdf_opts.do_ocr = True
         self.pdf_opts.picture_description_options = smolvlm_picture_description
         self.pdf_opts.layout_options.create_orphan_clusters = True
         self.pdf_opts.layout_options.keep_empty_clusters = False
-
-        # Configuring paginated document options for others (DOCX, PPTX, XLSX, etc.)
-        self.paginated_opts = PaginatedPipelineOptions()
+        
 
     @staticmethod
     def is_url(text: str) -> bool:
@@ -136,12 +154,11 @@ class LocalRAGRetriever:
         """Lazy-load and cache the tokenizer."""
         if self._tokenizer is None:
             try:
-                try: # Offline availability
-                    self._tokenizer: AutoTokenizer = AutoTokenizer.from_pretrained("bert-base-uncased", trust_remote_code=True, cache_dir="/tmp/huggingface_cache", local_files_only=True)
-                    logger.info(f"      - Using local files only for tokenizer")
-                except:
-                    self._tokenizer: AutoTokenizer = AutoTokenizer.from_pretrained("bert-base-uncased", trust_remote_code=True, cache_dir="/tmp/huggingface_cache")
-                    logger.info(f"      - Using online files for tokenizer")
+                self._tokenizer: AutoTokenizer = AutoTokenizer.from_pretrained("bert-base-uncased", trust_remote_code=True, local_files_only=True)
+                logger.info(f"      - Using local files only for tokenizer")
+            except (FileNotFoundError, ValueError) as e:
+                self._tokenizer: AutoTokenizer = AutoTokenizer.from_pretrained("bert-base-uncased", trust_remote_code=True)
+                logger.info(f"      - Offline Tokenizer not found, downloading...")
             except Exception as e:
                 logger.error(f"Error loading tokenizer: {e}")
                 raise Exception("Please ensure you have the 'transformers' library installed: pip install transformers")
