@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="RAG Retrieval API",
     description="Document retrieval system using RAG - Retrieval Only (No Inference)",
-    version="1.1.5"
+    version="1.2.0"
 )
 
 # Add CORS middleware
@@ -32,135 +32,45 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-LOCAL_CACHE_DIR = Path("/tmp/app_model_cache")
-DEFAULT_CACHE_AGE_HOURS = 24 
+# Mount point
+GCS_MOUNT_DIR = Path("/mnt/gcs")
 
-def is_cache_fresh(cache_dir: Path, max_age_hours: int) -> bool:
-    """Checks if the local cache directory exists and is within the age threshold."""
-    if not cache_dir.exists() or not any(cache_dir.iterdir()):
-        logging.info("📁 No local cache found.")
-        return False
-
-    try:
-        # Check cache age using the main directory's modification time
-        cache_mtime = cache_dir.stat().st_mtime
-        cache_age_seconds = time.time() - cache_mtime
-        age_hours = cache_age_seconds / 3600
-
-        if age_hours < max_age_hours:
-            logging.info(f"✅ Cache is fresh ({age_hours:.1f}h old, threshold: {max_age_hours}h).")
-            return True
-        else:
-            logging.info(f"⏰ Cache is stale ({age_hours:.1f}h old, threshold: {max_age_hours}h).")
-            return False
-    except Exception as e:
-        logging.error(f"Error checking cache age: {e}")
-        return False
-
-def download_cache_from_gcs(bucket_name: str, local_dir: Path) -> bool:
-    """Downloads the entire cache from a GCS bucket, clearing the old cache first."""
-    from google.cloud import storage
-
-    try:
-        client = storage.Client()
-        bucket = client.bucket(bucket_name)
-
-        # Clear existing cache to ensure a clean slate
-        if local_dir.exists():
-            logging.info(f"🧹 Clearing stale cache at {local_dir}...")
-            shutil.rmtree(local_dir)
-        local_dir.mkdir(parents=True, exist_ok=True)
-
-        logging.info(f"📥 Downloading cache from GCS bucket: gs://{bucket_name}...")
-        blobs = list(bucket.list_blobs())
-
-        if not blobs:
-            logging.warning("📭 GCS cache bucket is empty.")
-            return False
-
-        for i, blob in enumerate(blobs):
-            local_path = local_dir / blob.name
-            local_path.parent.mkdir(parents=True, exist_ok=True)
-            blob.download_to_filename(str(local_path))
-            if (i + 1) % 100 == 0:
-                 logging.info(f"📦 Downloaded {i + 1}/{len(blobs)} files...")
-
-
-        local_dir.touch()
-        logging.info(f"✅ Cache download complete. {len(blobs)} files synced.")
-        return True
-
-    except Exception as e:
-        logging.error(f"💥 Failed to download cache from GCS: {e}")
-        return False
-
-def initialize_cache_and_offline_env(cache_age_hours: int = DEFAULT_CACHE_AGE_HOURS):
+def initialize_offline_env():
     """
-    Initializes the application environment for offline model usage.
-
-    This function performs the following steps:
-    1. Sets up Google Cloud credentials.
-    2. Checks if the local model cache is fresh based on a TTL (Time-To-Live).
-    3. If the cache is missing or stale, it downloads the latest version from GCS.
-    4. Sets environment variables to force all supported libraries (Hugging Face, Docling)
-       to use the local cache in a strict offline mode.
+    Initialize environment for offline model usage using mounted GCS directory.
     """
-    logging.info("🚀 Initializing model cache and offline environment...")
+    logging.info("🚀 Setting up offline environment with mounted GCS cache...")
 
-    # 1. Setup GCS credentials if provided as a base64 JSON
-    if os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON"):
-        try:
-            key_data = base64.b64decode(os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON"))
-            cred_path = "/tmp/gcs-service-account.json"
-            with open(cred_path, "wb") as f:
-                f.write(key_data)
-            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = cred_path
-            logging.info("✅ Service account credentials loaded from ENV var.")
-        except Exception as e:
-            logging.error(f"Failed to decode GCS credentials: {e}")
+    # Verify mount exists
+    if not GCS_MOUNT_DIR.exists():
+        logging.error(f"❌ GCS mount not found at {GCS_MOUNT_DIR}")
+        raise FileNotFoundError(f"GCS bucket not mounted at {GCS_MOUNT_DIR}")
 
-    # 2. Sync cache from GCS if it's stale or missing
-    bucket_name = os.getenv("MODEL_CACHE_BUCKET")
-    if not bucket_name:
-        logging.warning("⚠️ MODEL_CACHE_BUCKET not set. Skipping GCS sync. Models must be manually cached.")
-    else:
-        if not is_cache_fresh(LOCAL_CACHE_DIR, cache_age_hours):
-            download_cache_from_gcs(bucket_name, LOCAL_CACHE_DIR)
+    # Point libraries to subdirectories in the mounted cache
+    hf_cache_path = GCS_MOUNT_DIR / "huggingface"
+    docling_cache_path = GCS_MOUNT_DIR / "docling"
 
-    # 3. Point all libraries to the correct subdirectories in the local cache
-    hf_cache_path = LOCAL_CACHE_DIR / "huggingface"
-    docling_cache_path = LOCAL_CACHE_DIR / "docling"
-    
-    # Create subdirectories if they don't exist
     hf_cache_path.mkdir(parents=True, exist_ok=True)
     docling_cache_path.mkdir(parents=True, exist_ok=True)
 
     os.environ["HF_HOME"] = str(hf_cache_path)
     os.environ["HF_DATASETS_CACHE"] = str(hf_cache_path / "datasets")
     os.environ["HF_HUB_OFFLINE"] = "1"
-
     os.environ["SENTENCE_TRANSFORMERS_HOME"] = str(hf_cache_path)
-
     os.environ["DOCLING_ARTIFACTS_PATH"] = str(docling_cache_path)
 
-    logging.info(f"HF_HOME set to: {os.getenv('HF_HOME')}")
-    logging.info(f"DOCLING_ARTIFACTS_PATH set to: {os.getenv('DOCLING_ARTIFACTS_PATH')}")
-    logging.info("✅ Environment is now configured for OFFLINE model loading.")
-
+    logging.info(f"✅ HF_HOME set to: {os.getenv('HF_HOME')}")
+    logging.info(f"✅ DOCLING_ARTIFACTS_PATH set to: {os.getenv('DOCLING_ARTIFACTS_PATH')}")
+    logging.info("✅ Environment configured for OFFLINE model loading from mounted GCS.")
 
 def prewarm_models():
-    """
-    Pre-loads models at startup to avoid runtime delays.
-    This will fail if models are not in the cache due to the offline setting.
-    """
+
     try:
         from transformers import AutoTokenizer
         from sentence_transformers import SentenceTransformer
 
-        logging.info("🔥 Pre-warming models (offline)...")
+        logging.info("🔥 Pre-warming models from mounted cache...")
 
-        # This call will look ONLY in the local cache.
-        # It will fail if "bert-base-uncased" is not present.
         tokenizer = AutoTokenizer.from_pretrained(
             "bert-base-uncased",
             local_files_only=True
@@ -174,25 +84,14 @@ def prewarm_models():
         )
         logging.info("   ✅ Embedding model 'nomic-embed-text-v1.5' ready.")
 
-        logging.info("✅ All models pre-warmed successfully from local cache.")
+        logging.info("✅ All models pre-warmed successfully from mounted cache.")
 
     except Exception as e:
-        # This error is expected if the models aren't in the GCS bucket/local cache.
-        logging.error(f"💥 Pre-warming failed. Ensure required models are in the cache bucket. Error: {e}")
-        tokenizer = AutoTokenizer.from_pretrained(
-            "bert-base-uncased", trust_remote_code=True
-        )
-        logging.info("   ✅ Tokenizer 'bert-base-uncased' ready.")
+        logging.error(f"💥 Pre-warming failed. Ensure models are in mounted cache at {GCS_MOUNT_DIR}. Error: {e}")
+        raise
 
-        model = SentenceTransformer(
-            "nomic-ai/nomic-embed-text-v1.5",
-            trust_remote_code=True
-        )
-        logging.info("   ✅ Embedding model 'nomic-embed-text-v1.5' ready.")
-
-
-# Initialize model cache on startup
-initialize_cache_and_offline_env()
+# Initialize on startup
+initialize_offline_env()
 prewarm_models()
 
 # Global variables to store retriever instances
