@@ -55,7 +55,7 @@ def initialize_offline_env():
 
     os.environ["HF_HOME"] = str(hf_cache_path)
     os.environ["HF_DATASETS_CACHE"] = str(hf_cache_path / "datasets")
-    os.environ["HF_HUB_OFFLINE"] = "1"
+    #os.environ["HF_HUB_OFFLINE"] = "1"
     os.environ["SENTENCE_TRANSFORMERS_HOME"] = str(hf_cache_path)
     os.environ["DOCLING_ARTIFACTS_PATH"] = str(docling_cache_path)
 
