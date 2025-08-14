@@ -45,6 +45,10 @@ def initialize_offline_env():
     if not GCS_MOUNT_DIR.exists():
         logging.error(f"❌ GCS mount not found at {GCS_MOUNT_DIR}")
         raise FileNotFoundError(f"GCS bucket not mounted at {GCS_MOUNT_DIR}")
+    else:
+        #list directories once
+        for item in GCS_MOUNT_DIR.iterdir():
+            logging.info(f"   📁 Found in GCS mount: {item}")
 
     # Point libraries to subdirectories in the mounted cache
     hf_cache_path = GCS_MOUNT_DIR / "huggingface"
@@ -54,8 +58,7 @@ def initialize_offline_env():
     docling_cache_path.mkdir(parents=True, exist_ok=True)
 
     os.environ["HF_HOME"] = str(hf_cache_path)
-    os.environ["HF_DATASETS_CACHE"] = str(hf_cache_path / "datasets")
-    #os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["HF_HUB_OFFLINE"] = "1"
     os.environ["SENTENCE_TRANSFORMERS_HOME"] = str(hf_cache_path)
     os.environ["DOCLING_ARTIFACTS_PATH"] = str(docling_cache_path)
 
