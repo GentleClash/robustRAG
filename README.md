@@ -2,6 +2,11 @@
 
 A high-performance, completely offline Retrieval-Augmented Generation (RAG) system featuring a 2.5-layer caching architecture for accelerated document retrieval and enhanced accuracy in critical domains.
 
+![architecture](asset/rag-architecture.png)
+<div align='center'><u> High Level Architecture</u></div>
+
+
+
 ## Table of Contents
 
 1. [Overview](#overview)
@@ -36,10 +41,6 @@ A high-performance, completely offline Retrieval-Augmented Generation (RAG) syst
 ## Overview
 
 LocalRAG is designed for applications requiring reliable, fast, and secure document retrieval without external API dependencies. The system combines advanced embedding techniques with intelligent caching to deliver production-ready performance for medical, financial, legal, and general domains.
-
-![architecture](asset/rag-architecture.png)
-<div align='center'><u> High Level Architecture</u></div>
-
 
 [↑ Back to top](#table-of-contents)
 
