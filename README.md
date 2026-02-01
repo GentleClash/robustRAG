@@ -37,6 +37,10 @@ A high-performance, completely offline Retrieval-Augmented Generation (RAG) syst
 
 LocalRAG is designed for applications requiring reliable, fast, and secure document retrieval without external API dependencies. The system combines advanced embedding techniques with intelligent caching to deliver production-ready performance for medical, financial, legal, and general domains.
 
+![architecture](asset/rag-architecture.png)
+<div align='center'><u> High Level Architecture</u></div>
+
+
 [↑ Back to top](#table-of-contents)
 
 ## Key Features
@@ -165,6 +169,10 @@ To set up the environment using Poetry:
 Now you're ready to use LocalRAG!
 
 ### Basic Usage
+
+```python
+streamlit run streamlit_app.py
+```
 
 ```python
 from robustRAG import LocalRAGRetriever, RAGConfig
